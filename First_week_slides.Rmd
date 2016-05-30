@@ -1,0 +1,106 @@
+---
+title: "First Week Bootcamp"
+author: "Matt Moocarme"
+date: "May 28, 2016"
+output: html_document
+---
+
+The goal is to understand if there are any differences in opinion between Germans and Americans about the recent trade agreement. 
+
+The data comes from the Pew reasearch center, which can be found at 'http://www.pewglobal.org/category/datasets/?download=31944' 
+
+```{r echo = F, loading_data, warning=FALSE}
+library(foreign)
+trade <- read.spss('data/Pew_trade.sav', 
+                   to.data.frame = T)
+```
+We can get a rough sense of the data using the 3
+
+We can look at some of the column names of the dataset:
+```{r, echo= F}
+head(colnames(trade))
+```
+
+
+Unfortunately the column names aren't indicative of the questions, this could be because to save sapce in the colmn name, i.e., 'Q1', 'Q2', are used instead the actual questions. The actual questions may be an attribute, so we can check that  
+```{r}
+#dim(trade)
+attr <- attributes(trade)
+#str(attr)
+labels <- attr$variable.labels
+```
+We can check out examples of the specific questions
+```{r, warning = F}
+labels[2]
+```
+```{r, eval=FALSE, warning = F}
+# Other ways to check out a question
+labels[which(names(trade) == 'Q1')]
+labels[names(trade) == 'Q1']
+```
+
+### Sentiment Analysis
+
+#### Sentiment by Country
+How do the Americans vs Germans feel about the trade deal
+
+Now we have the data we are going to tidy it up so that we are not working with any extraneous data. The goal is to look at what is the most frequent response. 
+The relevant variables we are interested in a the country, questions, and answers.
+```{r, warning=F, message=FALSE, tidy=TRUE}
+library(dplyr)
+library(tidyr)
+#select relevant columns
+trade_senti <- trade %>% select(country, contains('Q'))
+# reshape data so question and answwer are their own column
+trade_tidy <- trade_senti %>% gather(Question, Answer, -country)
+
+trade_freq <- trade_tidy %>% group_by(country, Question, Answer) %>% summarise(Total.count = n()) %>% mutate(freq.answer = 100*(Total.count/sum(Total.count))) 
+
+ordered_trade_freq <-trade_freq %>% arrange(country, Question, desc(Total.count))
+max_answer <- ordered_trade_freq %>% group_by(country, Question) %>% filter(Total.count == max(Total.count))
+
+head(max_answer)
+```
+Apart from some NA values floating around it is nice and tidy!
+
+Okay, now let's plot some things
+```{r, warning = F}
+library(ggplot2)
+my_plot <-ggplot(data = na.omit(max_answer), aes(x = Question, y =freq.answer, fill= country)) + geom_bar(stat = 'identity', position = 'dodge') 
+my_plot + coord_flip()
+```
+
+Now we will do the same, but only looking at question 1, the main difference here is that we only select question one at the beginning og the tidying process 
+```{r, warning = F}
+new_data <- trade %>% select(country, Q1) %>% gather(Question, Answer, -country) %>% group_by(Question, country, Answer) %>% summarise(Total.count = n()) %>% mutate(freq = Total.count/sum(Total.count)) %>% filter(Answer == 'Very good')
+```
+And now we plot
+```{r, warning = F}
+myQ1_plot <- ggplot(data= na.omit(new_data), aes(x = country, y = freq, fill= country))  + geom_bar(stat = 'identity', position = 'dodge')
+myQ1_plot + coord_flip()+scale_fill_brewer(palette="OrRd")
+```
+
+Next we will plot all the questions that have the answer 'All good' rather than just the most common answer
+```{r, warning = F}
+AllGood_data <- trade %>% select(country, contains('Q')) %>% gather(Question, Answer, -country) %>% group_by(country, Question, Answer) %>% summarise(Total.counts = n()) %>% mutate(rel.freq = Total.counts/sum(Total.counts)) %>% filter( Answer == 'Very good') 
+allQs_plot <- ggplot(data = AllGood_data, aes(x = Question, y = rel.freq, fill = country)) + geom_bar(stat = 'identity', position = 'dodge')
+allQs_plot + coord_flip() + scale_fill_brewer(palette = 'Set1')
+```
+
+Next we separate for the different answers, 'Very good', 'Somewhat good', 'Somewhat bad', 'Very bad', 'DK/Refused'.
+```{r, warning = F}
+sel_answers = c('Very good', 'Somewhat good', 'Somewhat bad', 'Very bad', 'DK/Refused')
+trade_data <- trade %>% select(country, contains('Q')) %>% gather(Question, Answer, -country) %>%  group_by(country, Question, Answer) %>% summarise(Total.counts = n()) %>% mutate(rel.freq = Total.counts/sum(Total.counts)) %>% filter(Answer %in% sel_answers) 
+allQs_plot_sep <- ggplot(data = na.omit(trade_data), aes(x = Question, y = rel.freq, fill = country)) + geom_bar(stat = 'identity', position = 'dodge') + facet_grid(~ Answer) + coord_flip()
+allQs_plot_sep 
+```
+
+
+#### Sentiment by demographic
+Separating question via income level. There is a factor coloumn in the dataset
+```{r, warning = F}
+q.income_data <- trade %>% filter(country == 'United States') %>% select(incomeUS, Q1) %>% gather(Question, Answer, -incomeUS) %>% group_by(incomeUS,Question, Answer ) %>% summarise(Total.counts = n()) %>% mutate(rel.freq = Total.counts/sum(Total.counts))
+q.income.plot = ggplot(data = na.omit(q.income_data), aes(x = Answer, y = rel.freq, fill = incomeUS)) + geom_bar(stat = 'identity')
+q.income.plot  + scale_fill_brewer(palette = 'Spectral')
+```
+

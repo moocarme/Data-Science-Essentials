@@ -1,0 +1,116 @@
+---
+title: "Can the internet tell me when to buy and sell stocks?"
+author: "Matt Moocarme"
+date: "June 2, 2016"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+### Thesis
+Stock market prices flutuate in a way that is notoriously difficult to predict.
+Here I will attempt to use data accululated through the internet to attempt to predict when there will be large flutuations in stock market prices that will trigger a buy or sell action.
+
+My hypothesis is that many fluctuations in the stock market prices may be predicted by analysing news reports, twitter feeds, etc. For example the stock prices of Apple climb at the release of a new product, around the time of the release there is likely to be many different news reports and articles posted amongst the web, as well as many consumers tweeting their excitement for the upcoming product.
+
+By incorporating this information perhaps I can better predict large flutuations in stock market prices and generate higher returns on investments.
+
+
+First I will begin by loading in the data and tidying it up.
+My goal is to have each column a separate variable, and each row a separate observation. I will load in the data using the quantmod package. 
+Data tidying will be done using dplyr and tidyr. Additional help will come from the zoo, xts, and TTR libraries since the historical stock data comes in xts form due to its ease with working with time-series data.
+
+```{r library_loading}
+library(zoo)
+library(TTR)
+library(xts)
+library(quantmod)
+library(dplyr)
+library(tidyr)
+```
+
+### Grabbing stock indices
+
+Here I add in the stock symbols that I want, the function getSymbols generates an xts file for each stock symbol with the same name.
+
+```{r grab_stocks}
+# Choose stock company
+Nasdaq100_Symbols <- c('AAPL', 'AMZN')
+stocks <- getSymbols(Nasdaq100_Symbols)
+
+```
+
+Since the stock data is separate for each stock I will combine them in a matrix named df, and also combine the column names in a separate list as this will be useful in understanding the data
+
+```{r}
+cols = list()
+df <- matrix(data = NA, ncol = 6*length(stocks), nrow = dim(get(stocks[1]))[1])
+for(i in 1:length(stocks)){
+  in1 <- 6*(i-1)+1
+  in2 <- 6*i
+  df[,in1:in2] <- get(stocks[i])
+  cols <- c(cols, colnames(get(stocks[i])))
+}
+colnames(df) <- cols
+```
+
+Next row names are added and a separate column for the date is added, labelled, and the matrix is converted to a data frame 
+
+```{r}
+rownames(df)<- as.character.Date(index(get(stocks[1])))
+df.dates <- as.data.frame(cbind(as.character.Date(index(get(stocks[1]))), df))
+colnames(df.dates)[1] <- 'Date'
+head(df.dates)
+```
+
+Now we will tidy the data using dplyr and tidyr to only include the data we are interested in. Here we will just take the adjusted values since they take into account stock splits, dividends etc which may skew prices.
+
+```{r}
+tidy_stocks <- as.data.frame(df.dates) %>% 
+  select(Date, contains('Adjusted')) %>% 
+  gather(Index, Price, -Date) 
+head(tidy_stocks)
+```
+
+Calculating the returns on prices will be the next thing we will do. The simple daily return, $R_s$, is calculated with the relation $R_s = \frac{P_j-P_{j-1}}{P_{j-1}}$, where $P_{j}$ is the price at day $j$, and $P_{j-1}$ is the price the previous day. The log return, $R_{cc}$, is another useful relation that assumes the difference in price is calculated via continuously compounding, $R_{cc}$ is calculated using the relation $R_{cc} = \log(P_{j})-\log(P_{j-1})$.
+
+We can add this to the data frame using the mutate function.
+
+```{r}
+stock_returns <- tidy_stocks %>%
+  mutate(Simple.return = ifelse(lag(Index)==Index,(as.numeric(Price)-as.numeric(lag(Price)))/(as.numeric(lag(Price))),0)) %>%
+  mutate(Log.return = ifelse(lag(Index)==Index,(log(as.numeric(Price))-log(as.numeric(lag(Price)))),0))
+head(stock_returns)
+```
+
+
+### Plotting the stock prices and the returns
+For exploratory data analyses it is useful to plot various things to get a feel for the data. Here we will just look at apple.
+
+Using ggplot we can plot the price as a function of time, as well all the daily log return, and a histogram of the daily log return.
+```{r}
+library(ggplot2)
+aapl_returns <- stock_returns %>% filter(grepl('AAPL',Index)) %>% select(-Index)
+head(aapl_returns)
+plot1 <- ggplot(data = aapl_returns, aes(x = Date, y = as.numeric(Price), group = 1))+geom_line()+ geom_point(color="blue")
+plot1 + ggtitle('Price over time')
+plot2 <- ggplot(data = aapl_returns, aes(x = Date, y = Log.return, group = 1)) + geom_line() 
+plot2 + ggtitle('Log return over time')
+plot3 <- ggplot(data = aapl_returns, aes(Log.return)) + geom_histogram(bins = 70)
+plot3 + ggtitle('Histogram of the Log return')
+```
+
+
+We can see that stock of Apple has increased steadily over the course of the dataset, since the beginning of 2007. Also from the histogram of the daily log return we can see that the center of this distribution is almost around zero, which agrees with intuition, that on average if you invested in Apple for one day there would likely not be much return.
+
+```{r}
+meanDist.daily <- mean(na.omit(aapl_returns$Log.return))
+meanDist.yearly <- meanDist.daily * 252
+meanDist.daily
+meanDist.yearly
+```
+
+On average over the course of one day you are likely to increase the value of your stock by `r round(meanDist.daily, digits = 6)*100`% and over the year it would be `r round(meanDist.yearly, digits = 6)*100 `% since there are 252 trading days in a year.
+

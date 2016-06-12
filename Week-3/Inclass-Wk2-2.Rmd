@@ -1,0 +1,304 @@
+---
+title: "Drink Recommender"
+author: "Matt Moocarme"
+date: "June 12, 2016"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, 
+                      warning = FALSE,
+                      cache = T,
+                      message = FALSE,
+                      comment = '',
+                      echo = F)
+```
+
+```{r}
+library(jsonlite)
+library(readr)
+library(dplyr)
+library(tidyr)
+library(stringr)
+
+
+margarita<- as.data.frame(fromJSON('http://www.thecocktaildb.com/api/json/v1/1/search.php?s=margarita'))
+head(margarita)
+
+by_id <- as.data.frame(fromJSON('http://www.thecocktaildb.com/api/json/v1/1/lookup.php?i=15112'))
+str(by_id)
+
+#database=data.frame()
+#for(i in 10000:20000) {
+# link="http://www.thecocktaildb.com/api/json/v1/1/lookup.php?i="
+#  z=paste(link,i,sep="")
+#  data=as.data.frame(fromJSON(z))
+#  database=rbind(database,data)
+#  print(i)
+#}
+
+database <- read_csv('data/database.csv')
+str(database)
+dim(database)
+
+
+db1 <- database %>% select(cocktail.name = drinks.strDrink, 
+                           drinks.strIngredient1:drinks.strIngredient7,
+                           drinks.strMeasure1:drinks.strMeasure7)
+
+```
+
+```{r}
+nas <- c('',' ','/t','\n')
+db1[db1 == ''] = NA
+db1[db1 == ' '] = NA
+db1[db1 == '/t'] = NA
+db1[db1 == '\n'] = NA
+
+sum(is.na(db1))
+
+db1[is.na(db1)] = 0
+sum(is.na(db1))
+
+db <- as.data.frame(lapply(db1, as.character), stringsAsFactors = F)
+
+db_ingridient <- db %>% select(cocktail.name:drinks.strIngredient7) %>% 
+  gather(Ingredient.number, Ingredient, drinks.strIngredient1:drinks.strIngredient7, -cocktail.name) %>%
+  select(-Ingredient.number)
+db_measurement <- db %>% select(cocktail.name, drinks.strMeasure1:drinks.strMeasure7) %>%
+  gather(Measurement.number, Measurement, drinks.strMeasure1:drinks.strMeasure7, -cocktail.name) %>% 
+  select(-Measurement.number)
+
+db_join <- db_measurement %>% bind_cols(select(db_ingridient, Ingredient)) 
+
+db2 <- db %>% gather(Ingredient.Number,Ingredient,drinks.strIngredient1:drinks.strIngredient7, -cocktail.name) %>%
+  gather(Measurement.Number, Measurement, drinks.strMeasure1:drinks.strMeasure7, -cocktail.name)
+
+db2 <- db2 %>% filter(substr(Measurement.Number, nchar(Measurement.Number), nchar(Measurement.Number))== substr(Ingredient.Number, nchar(Ingredient.Number), nchar(Ingredient.Number)))
+
+db3 <- db2 %>% select(-Ingredient.Number, -Measurement.number) 
+
+db4 <- db_join %>% filter(Ingredient != '0') %>%
+  group_by(Ingredient) %>% 
+  summarise(Total.count = n()) %>% 
+  arrange(desc(Total.count))
+
+head(db4, 20)
+
+
+db5 <- db_join %>% filter(Ingredient != '0') %>%
+  group_by(Measurement) %>% 
+  summarise(Total.count = n()) %>% 
+  arrange(desc(Total.count))
+
+head(db5, 20)
+
+meas <- unique(db3$Measurement)
+(filter(meas, Measurement %in% c('oz','ml')))
+
+```
+```{r}
+# for mac users. remove white spaces.
+db_tidy <-mutate(db3,
+               amount = str_trim(db3$Measurement, side = "both"))# separate numbers into its own column. # We will create a new column in each step to see the reduction in anomalities. # create a new column with numbers with punctuation.
+db_tidyz <- db_tidy %>% mutate(number=gsub("[^[:digit:],^[:punct:] ]", "", Measurement)) #%>% #head()
+ 
+# Trim both sides from whitespaces
+db_tidyz <- db_tidyz %>% mutate(numbe=str_trim(number,side="both"))
+ 
+# replace double and triple and so on whitspaces with single whitespace
+ 
+db_tidyz <- db_tidyz %>% mutate(numb=gsub("\\s+"," ",numbe)) #%>% #head()
+ 
+# Select all numbers that matching the following four patterns
+db_tidyz <- db_tidyz %>% mutate(num=str_extract(number,"[:digit:]+\\s+[:digit:]+[:punct:]+[:digit:]|[:digit:]+[:punct:]+[:digit:]+|[:digit:]+|[:digit:]+[:punct:]+[:digit:]+[:digit:]+")) #head()# Replace all whitespaces with + sign
+db_tidyz <- db_tidyz %>% mutate(nu=str_replace_all(num," ","+"))#head()# Separate everything that has "-" into two columns
+db_tidyz <- db_tidyz %>% separate(nu,c("nu","nuu"), sep="-") # head()# Select text only (with white spaces)  
+db_tidyz <- db_tidyz %>% mutate(unit=gsub("[[:digit:]|[:punct:]]","",amount)) # head()
+ 
+# Trim both sides from whitespaces
+db_tidyz <- db_tidyz %>% mutate(unit=str_trim(unit,side="both")) 
+ 
+#replace double and triple and so on whitspaces with single whitespace
+db_tidyz <- db_tidyz %>% mutate(unit=gsub("\\s+"," ",unit))# set NAs to 1
+db_tidyz[is.na(db_tidyz)]<-1#Check unique values for number, numbe, num and unit
+unique(db_tidyz$number)
+unique(db_tidyz$numbe)
+unique(db_tidyz$numb)
+unique(db_tidyz$num)
+unique(db_tidyz$nu)
+unique(db_tidyz$unit)
+
+```
+
+```{r ingrindient_to_ml}
+# Select only cocktail name, ingredient, nu number and unit column
+db_tidyx <- db_tidyz %>%
+   select(cocktail.name,Ingredient,nu, unit)
+
+db_tidyx %>% head()
+
+# Replace units with proper conversion to mL
+db_tidyx <- db_tidyx %>%
+   mutate(unit=str_replace(unit,"ozjamaican","oz")) %>%
+   mutate(unit=str_replace(unit,"oz","29.5")) %>%
+   mutate(unit=str_replace(unit,"shot","29.5")) %>%
+   mutate(unit=str_replace(unit,"jigger","44.5")) %>%
+   mutate(unit=str_replace(unit,"cup","257")) %>%
+   mutate(unit=str_replace(unit,"tblsp","11.1")) %>%
+   mutate(unit=str_replace(unit,"tsp","3.7")) %>%
+   mutate(unit=str_replace(unit,"ts p","3.7")) %>%
+   mutate(unit=str_replace(unit,"teaspoon","3.7")) %>%
+   mutate(unit=str_replace(unit,"cl","10")) %>%
+   mutate(unit=str_replace(unit,"dl","100")) %>%
+   mutate(unit=str_replace(unit,"litre","1000")) %>%
+   mutate(unit=str_replace(unit,"liter","1000")) %>%
+   mutate(unit=str_replace(unit,"dash","0.9")) %>%
+   mutate(unit=str_replace(unit,"splash","3.7")) %>%
+   mutate(unit=str_replace(unit,"twist","15")) %>%
+   mutate(unit=str_replace(unit,"twistof","15")) %>%
+   mutate(unit=str_replace(unit,"can","355")) %>%
+   mutate(unit=str_replace(unit,"cube","12")) %>%
+   mutate(unit=str_replace(unit,"part","29.5")) %>%
+   mutate(unit=str_replace(unit,"pint","473")) %>%
+   mutate(unit=str_replace(unit,"glass","473"))
+
+# Check if missing something like glass or a pint add it to the code on top
+unique(db_tidyx$unit)
+
+```
+```{r dealing_with_fractions}
+
+
+db_tidyc<-db_tidyx %>%
+   # Select all numbers that matching the following patterns
+   mutate(unit=str_extract(unit,"[:digit:]+[:digit:]+[:punct:]+[:digit:]|[:digit:]+[:punct:]+[:digit:]+|[:digit:]+|[:digit:]+[:punct:]+[:digit:]+[:digit:]+"))   #head()
+   
+   # Convert unit column to numeric
+db_tidyc <- db_tidyc %>% mutate(unit=as.numeric(unit))  
+   
+   # replace comma , with dot .
+db_tidyc <- db_tidyc %>% mutate(nu=gsub(",",".",nu))  
+   # add left and right brackets for nu colum for proper parsing and evaluation
+db_tidyc <- db_tidyc %>%    mutate(nu=sub("^", "(",nu))    #head()
+db_tidyc <- db_tidyc %>%    mutate(nu=sub("$", ")",nu))  #%>%  head()
+
+# set NAs to 1
+db_tidyc[is.na(db_tidyc)]<-1
+      
+# parse and evaluate nu
+m2 <- sapply(db_tidyc$nu ,function(x) eval(parse(text=x)))
+
+str(m2)
+
+# add m2 as a new column 
+db_tidyc$nup<-m2
+
+# compare nu and nup for sanity check 
+head(db_tidyc,10)
+
+# looks good
+
+# multiply nup and unit for the measure
+db_tidyc<- db_tidyc %>%
+   mutate(measure=nup*unit)
+
+#db_tidyc %>% head(10)
+
+#  Select only cocktail name, ingridient and measure
+db_clean_tidy <- db_tidyc %>%
+   select(cocktail.name,Ingredient,measure)
+
+db_clean_tidy %>% head(10)
+```
+
+
+```{r}
+db_clean_tidy$row <- 1:nrow(db_clean_tidy)
+db_spread <- db_clean_tidy %>% spread(Ingredient, measure) %>% select(-row)
+
+db_spread[is.na(db_spread)]<-0
+
+# Group by cocktail name
+db_spread_comb <- db_spread %>%
+   group_by(cocktail.name) %>%
+   summarise_each(funs(sum))
+
+
+
+# Check ingridients for a random cocktail
+i=37
+colnames(db_spread_comb)[which(db_spread_comb[i,]!=0)]
+
+"salt" %in% colnames(db_spread_comb)
+
+# Spread is ready! Let's save it!
+write.csv(db_spread_comb,"db_spreaded.csv")
+```
+
+```{r}
+dtf <- db_spread_comb[,-1]
+km.out <- kmeans(dtf, 10, nstart = 20, iter.max = 50)
+dclust <- data.frame(km.out$cluster, db_spread_comb$cocktail.name)
+
+dtf <- as.data.frame(sapply(dtf, as.numeric))
+
+xcorr<-cor(dtf)
+xcorr[is.na(xcorr)]<-0
+
+cor_mat<-xcorr
+most_cor <- which(abs(cor_mat) > 0.75 & cor_mat != 1,
+                 arr.ind=TRUE)
+rownames(cor_mat)[7]
+```
+
+```{r}
+angle <- function(x,y){
+ dot.prod <- x%*%y
+ norm.x <- norm(x,type="2")
+ norm.y <- norm(y,type="2")
+ theta <- acos(dot.prod / (norm.x * norm.y))
+ as.numeric(theta/3.14*180)
+}
+
+# Prepare ingredient term matrix
+dtf <- sapply(dtf, as.numeric)# Create dummy inner product matrix
+sumi<-matrix(nrow=nrow(dtf),ncol=nrow(dtf))# Test if angle function works, answer is in degrees
+angle(dtf[100,],dtf[220,])# Apply angle function on ingredient term matrix (without cocktail names), 
+
+#row by row
+
+#for (i in 1:nrow(dtf)){
+#   for (j in 1:nrow(dtf)){
+#   sumi[i,j]<-angle(dtf[i,],dtf[j,])
+#   print(i)
+#   print(j)
+#   }
+# }
+
+
+# Replace NAs with 0
+sumi[is.na(sumi)]<-0# Get histogram
+hist(sumi)# Convert to dataframe set rows and columns names to the names of cocktails
+sumidf<-as.data.frame(sumi)
+colnames(sumidf)<-db_spread_comb$cocktail.name
+rownames(sumidf)<-colnames(sumidf)# Replace NAs with 0s
+sumidf[is.na(sumidf)]<-0# Save as db_innerproduct_matrix.csv
+#write.csv(sumi,"cocktailz/db_innerproduct_matrix.csv")
+## Explore inner products matrix```{r Explore_Inner_Products, eval=FALSE}
+# Load Inner Products Matrix, set rownames the same as column names
+#dfsumi<-read.csv("db_innerproduct_matrix.csv", header = TRUE)
+dfsumi<-dfsumi[,-1] # take out row number colnames(dfsumi) <- db_spread_comb$cocktail.name[1:3156]
+rownames(dfsumi)<-colnames(dfsumi)# set NAs to zero
+dfsumi[is.na(dfsumi)] <- 0
+# Choose Margarita
+x<-dfsumi %>%
+  select(Margarita)
+rownames(x)<-colnames(dfsumi)
+x<-sapply(x, as.numeric)y<-colnames(dfsumi)
+hist(x[x<70])# Perform unsupervised kmeans clustering on inner products matrix
+km.out.ip <- kmeans(dfsumi, 10, nstart =20,iter.max=50)# previous cluster
+ip.x <-as.data.frame(km.out.ip$cluster)ip.x <- bind_cols(ip.x, as.data.frame(rownames(ip.x)))
+```
+
+

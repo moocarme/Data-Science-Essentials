@@ -1,0 +1,273 @@
+---
+title: "week_3"
+author: "S.Samsonau"
+date: "June 7, 2016"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, eval = FALSE)
+```
+
+# Goals
+
+https://www.kaggle.com/c/shelter-animal-outcomes
+
+# Data
+
+Data are from here https://www.kaggle.com/c/shelter-animal-outcomes
+(playground projects. not a real competition. Does not awards points.)
+
+## Load data
+
+```{r}
+library(readr)
+#setwd("week3")
+DF <- read_csv("../../Kaggle/ShelterAnimal/train.csv")
+
+dim(DF)
+head(DF)
+str(DF)
+```
+
+# Clean data and do feature engineering
+
+```{r child = "data/animal_data_preparation.Rmd", eval = TRUE}
+```
+
+# Making basic prediction
+
+* Write a function "train_lm". We can use this function with different parameters, keeping Rmd clean
+* Source it and use it. Use default values in function
+* Learn to do debuging in R
+
+## Fit basic linear model
+
+Prepare a formula for interaction terms if needed
+
+```{r}
+incl_var <- "(AnimalType + PopName + BreedSH + BreedL + BreedD + BreedMix + Breed2)"
+
+form = str_c("~ " ,  str_c(names(DF_B)[-1], collapse = " + "), 
+             "+ AgeOnOutcome:", incl_var,
+             "+ AgeOnOutcome2:", incl_var,
+             "+ AgeOnOutcome3:", incl_var,
+             "+ AgeOnOutcome12:", incl_var,
+             "+ AgeOnOutcome13:", incl_var) 
+form.f <- as.formula(form)
+```
+
+
+```{r}
+source("data/train_lm.R")
+#debugSource("train_lm.R")
+
+res_LM <- train_lm(DF_B, error_est = "none", model = "glm", 
+                   y_ind = 1, x_ind = 2:ncol(DF_B),   
+                   form.f = form.f)
+names(res_LM)
+
+```
+
+## Evaluating Linear Model
+
+### Predict for one observation of training data
+
+```{r}
+# LEt us take first record in test as an example
+View(res_LM$train[1, ])
+
+predict(res_LM$model, res_LM$train[1, ])
+
+#Predicted Probability
+predict(res_LM$model, res_LM$train[1, ] , type = "prob")
+
+#actual::
+res_LM$train[1, "outcome"]
+
+```
+
+### Predict for all the train observations
+
+```{r}
+trainPred <- predict(res_LM$model, res_LM$train)
+
+confusionMatrix(trainPred, res_LM$train$outcome, positive = "yes")
+
+# Predicted probabilities
+trainPred <- predict(res_LM$model, res_LM$train, type = "prob")
+```
+
+
+### ROC Curve
+
+ROC curve is Sensitivity vs Specificity for different cut-off points. 
+(If x axis goes from 0to1 vs 1to0, then Sensit vs 1-Spec)
+
+Each point on the ROC curve represents a sensitivity/specificity pair corresponding to a particular decision threshold.  The closer the ROC curve is to the upper left corner, the higher the overall accuracy of the test.
+
+http://topepo.github.io/caret/other.html
+
+### plot, get probabilities
+
+Function for drawing ROC curve and calculating "best cut-off
+
+```{r, child='data/make_ROC_curve.R'}
+```
+
+```{r}
+source("data/make_ROC_curve.R")
+ret <- make_ROC(res_LM)
+best.cut.off <<- ret$best.cut.off
+trainPred <<- ret$trainPred
+```
+
+Interpretation: 
+* We want to accept all those who has a chance to be adopted. We want to see high sensitivity algorithm.
+* We want to reject all those who has a chance to be not-adopted. We want to see high selectivity algorithm.
+
+```{r}
+
+confusionMatrix(ifelse(trainPred[, "yes"] > best.cut.off, "yes", "no"), 
+                res_LM$train$outcome, positive = "yes")
+
+# compare to default 0.5
+confusionMatrix(ifelse(trainPred[, "yes"] > 0.5, "yes", "no"), 
+                res_LM$train$outcome, positive = "yes")
+
+# compare to default 0.9 - look at Specificity
+confusionMatrix(ifelse(trainPred[, "yes"] > 0.9, "yes", "no"), 
+                res_LM$train$outcome, positive = "yes")
+```
+
+## Rpart
+
+* no need to scale data for any tree models
+
+### How to train model with different parameters - how to compare
+
+Either use Accuracy, or Kappa, or ROC (AUC), or distance to best model...
+
+* http://appliedpredictivemodeling.com/blog/2014/2/1/lw6har9oewknvus176q4o41alqw2ow
+
+```{r}
+# change parameters in train_lm file for AUC and parameter grid
+source("train_lm.R")
+res_rp <- train_lm(DF_B, error_est = "cv", model = "rpart", 
+                   y_ind = 1, x_ind = 2:ncol(DF_B), par = T)
+res_rp$model
+confusionMatrix(res_rp$model)
+
+# ROC 
+ret <- make_ROC(res_rp)
+best.cut.off <<- ret$best.cut.off
+trainPred <<- ret$trainPred
+
+confusionMatrix(ifelse(trainPred[, "yes"] > best.cut.off, "yes", "no"), 
+                res_rp$train$outcome, positive = "yes")
+
+```
+
+
+#### RF
+
+* does not overfit while number of trees is large.
+* trees ansambles trained independently can be combined
+
+```{r}
+# change parameters in train_lm file for AUC and parameter grid
+source("train_lm.R")
+res_rf <- train_lm(DF_B, error_est = "oob", model = "rf", 
+                   y_ind = 1, x_ind = 2:ncol(DF_B), par = T)
+
+res_rf$model$finalModel
+
+## See how number of trees affects Error
+plot(res_rf$model$finalModel)
+
+# ROC 
+ret <- make_ROC(res_rf)
+best.cut.off <<- ret$best.cut.off
+trainPred <<- ret$trainPred
+
+confusionMatrix(ifelse(trainPred[, "yes"] > best.cut.off, "yes", "no"), 
+                res_rf$train$outcome, positive = "yes")
+
+```
+
+### boosted tree
+
+* can perform better than rf
+* slower to learn
+* can overfit for large number of trees.
+
+### ADA boost
+
+* will do boosted tree model + will change weigth to misclassified classes adaptivelly. 
+Helps for unbalanced classes situation etc.
+
+
+#### Resapling Unbalanced classes
+
+Other approach to unbalanced classes - resampling
+* http://topepo.github.io/caret/sampling.html
+
+
+#### SVM
+
+```{r}
+# change parameters in train_lm file for AUC and parameter grid
+source("train_lm.R")
+res_svm <- train_lm(DF_B, error_est = "cv", model = "svmLinear", 
+                   y_ind = 1, x_ind = 2:ncol(DF_B), par = T)
+
+res_svm$model$finalModel
+
+confusionMatrix(res_svm$model)
+
+# ROC 
+ret <- make_ROC(res_svm)
+best.cut.off <<- ret$best.cut.off
+trainPred <<- ret$trainPred
+
+confusionMatrix(ifelse(trainPred[, "yes"] > best.cut.off, "yes", "no"), 
+                res_svm$train$outcome, positive = "yes")
+
+```
+
+one-vs-all (all-pair) approach for many classes
+
+#### Other models implemented in caret
+
+* https://topepo.github.io/caret/modelList.html
+
+
+### Combining different models. 
+
+GAM - general additive models.
+Caret - combining models. ansamble models
+
+
+## All classes
+
+### rpart
+
+```{r}
+res_rp_all <- train_lm(DF, error_est = "cv", model = "rpart", y_ind = 1, x_ind = 2:ncol(DF), form.f = form.f, par = T)
+res_rp_all$model
+confusionMatrix(res_rp_all$model)
+
+#predict on train
+trainPred <- predict(res_rp_all$model, res_rp_all$train)
+
+confusionMatrix(trainPred, res_rp_all$train$outcome)
+
+```
+
+### rf
+
+```{r}
+res_rf_all <- train_lm(DF, error_est = "oob", model = "rf", y_ind = 1, x_ind = 2:ncol(DF), par = T)
+res_rf_all$model$finalModel
+
+```

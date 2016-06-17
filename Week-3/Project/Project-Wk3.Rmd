@@ -1,0 +1,300 @@
+---
+title: "Making Predictions with Google Trend Data"
+author: "Matt Moocarme"
+date: "June 16, 2016"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, 
+                      warning = FALSE,
+                      cache = T,
+                      message = FALSE,
+                      comment = '',
+                      echo = F
+                      )
+```
+
+## Google Trends as a Predictor 
+
+  Here I hypothesize that trends in the fluctuation in the stock market can be predicted by the relative changes in amount terms related to the stock index is searched on search engines. For this google trends is useful since it gathers the total number of searches relative to the total search volume in google. For this I used the *googletrend* library to load the data for a particular topic.
+  
+I will test this hypothesis on the Apple stock. Apple is very popular and often talked about, if there is no correlation then we cannot reject the null hypothesis: the stock price is independent of relative search volume in google.
+
+In this week I will use the google trend output as a predicter in a time series model. The time series model I will use is an autoregressive intergrated moving average (ARIMA) model, this model will take $x$ number of days of time series data and use it to forecast a given number of days ahead.
+  
+```{r load_libraries}
+library(httr)
+library(twitteR)
+library(httpuv)
+library(googletrend)
+library(caret)
+library(stringr)
+library(tm)
+library(dplyr)
+library(plyr)
+library(quantmod)
+library(lubridate)
+library(lattice)
+library(timeSeries)
+library(rugarch)
+library(googletrend)
+
+
+
+```
+
+The google trend output for keyword 'Apple' in the United States
+
+```{r gtrends}
+#gtrendApple <- googletrend::gettrend(keyword = "apple", geo = "US-NY", plot = TRUE)
+gtrendApple <- datareader('report.csv', simple = TRUE)$trend
+gtrendApplen <- gtrendApple[!is.na(gtrendApple[,1]),]
+gtrendApplen[,1] <-gtrendApplen[,1]+1 # adjust date to Monday
+```
+
+We can see that there is a clear trend in the data. Notably there appears to be some time-dependence, with spikes roughly twice per year.
+
+We can also plot the adjusted stock price as a function of time.
+
+```{r getAAPL, echo = F}
+
+# Obtain the AAPL returns and truncate the NA value
+getSymbols("AAPL", from="2007-01-01")
+```
+```{r}
+ggplot() + geom_line(data = AAPL, aes(x = index(AAPL), y = Ad(AAPL))) + labs(x = 'Date', y = 'Adjusted Stock Price')
+spReturns = diff(log(Ad(AAPL))) # may have to use the adjusted rate because of stock split
+spReturns[as.character(head(index(Cl(AAPL)),1))] = 0
+```
+
+We can also plot the log daily return, given as $r = \log(P_j) - \log(P_{j-1})$, where $P_{i}$ is the price on a given day, $i$.
+```{r plot_logreturn}
+ggplot() + geom_line(data = spReturns, aes(x = index(spReturns), y = spReturns)) + labs(x = 'Date', y = 'Log Returns')
+```
+
+And we can plot the autocorrelation function to see if there is any correlation between the daily rates.
+```{r}
+acf(spReturns, lag.max = 10, type = c("correlation", "covariance", "partial"))
+```
+
+In general there does not seem to much correlation between daily rates, as there are not any spikes above the 0.05 significance line. This indicates that the daily rates are akin to random fluctuations. To prove this we can plot the autocorrelation for uniform random numbers, which should no correlation
+
+```{r}
+acf(runif(1000), lag.max = 10, type = c("correlation", "covariance", "partial"))
+```
+We can see that there are higher significant spikes on the random numbers compared to the daily returns. This tells us that it should be quite difficult to forecast the stock market return from looking at previous returns. After 2 days there is a negative spike around 0.05 and a positive spike above 0.05 after 4 days telling us that there is a slightly significant negative correlation after 2 days, a a significant correlation after 4 days in stock market return.
+
+The trend is by no means clear though, which may lend credibility to the idea of looking at google trends as an indicator for stock market returns. 
+
+
+```{r join_df}
+# get date column and join
+spReturns2 <- data.frame(week=index(spReturns), coredata(spReturns))
+tot_df <- left_join(spReturns2, gtrendApplen, by = 'week')
+tot_df$index <-na.spline(tot_df$index)# spline gtrend data
+tot_df[tot_df$index<0] <- 0
+```
+
+We will attempt to predict the stock market price using the ARIMA model, in which the stock market return is a weighted linear sum of the $n$ last daily stock returns. The ARIMA model has $p$ auro regressive terms, $d$ differencing operations, and $q$ moving average terms. To select the best number of parameters we will run through all combinations in parameter space and pick the best one.
+
+We combine the ARIMA model with the generalized autoregressive conditional heteroscedastic (GARCH) model which models volatility, and looks at how it changes over time. Typically the volatility varies less over time compared to the daily return, so we use larger windows to predict the volatility, such as 100 days.
+
+We run the model, and for positive outcomes, the model predicts the return will be positive, a $1$ is outputted, which represents a long position, or buy. Else if the stock return is negative, a $-1$ is outputted, representing a short postion or sell.
+
+Finally the equity curve is produced, which displays the relative change in value of the asset over time. If the equity curve remained at zero, there would be no change, if the equity curve climbed to 1, the value of the asset doubled.
+```{r Arima_setup}
+# Create the forecasts vector to store the predictions
+windowLength = 100
+foreLength = length(spReturns) - windowLength
+forecasts <- vector(mode="character", length=foreLength)
+```
+
+
+
+```{r eval=F}
+ptm <- proc.time()
+
+for (d in 0:foreLength) {
+  # Obtain the S&P500 rolling window for this day
+  spReturnsOffset = spReturns[(1+d):(windowLength+d)]
+  
+  # Fit the ARIMA model
+  final.aic <- Inf
+  final.order <- c(0,0,0)
+  
+  #go through all pq combinations
+  for (p in 0:5) for (q in 0:5) {
+    if ( p == 0 && q == 0) {
+      next
+    }
+    
+    # Add xreg for googletrend/twitter
+    arimaFit = tryCatch( arima(spReturnsOffset, order=c(p, 0, q)),
+                         error=function( err ) FALSE,
+                         warning=function( err ) FALSE )
+    
+    if( !is.logical( arimaFit ) ) {
+      current.aic <- AIC(arimaFit)
+      if (current.aic < final.aic) {
+        final.aic <- current.aic
+        final.order <- c(p, 0, q)
+        # Add xreg for googletrend/
+        final.arima <- arima(spReturnsOffset, order=final.order)
+      }
+    } else {
+      next
+    }
+  }
+  
+  # Specify and fit the GARCH model
+  spec = ugarchspec(
+    variance.model=list(garchOrder=c(1,1)),
+    mean.model=list(armaOrder=c(final.order[1], final.order[3]), include.mean=T),
+    distribution.model="sged"
+  )
+  fit = tryCatch(
+    ugarchfit(
+      spec, spReturnsOffset, solver = 'hybrid'
+    ), error=function(e) e, warning=function(w) w
+  )
+  
+  # If the GARCH model does not converge, set the direction to "long" else
+  # choose the correct forecast direction based on the returns prediction
+  # Output the results to the screen and the forecasts vector
+  if(is(fit, "warning")) {
+    forecasts[d+1] = paste(index(spReturnsOffset[windowLength]), 1, sep=",")
+    print(paste(index(spReturnsOffset[windowLength]), 1, sep=","))
+  } else {
+    fore = ugarchforecast(fit, n.ahead=1)
+    ind = fore@forecast$seriesFor
+    forecasts[d+1] = paste(colnames(ind), ifelse(ind[1] < 0, -1, 1), sep=",")
+    print(paste(colnames(ind), ifelse(ind[1] < 0, -1, 1), sep=",")) 
+  }
+}
+proc.time() - ptm
+
+write.csv(forecasts, file="forecasts_wogtrend2.csv", row.names=FALSE)
+```
+
+```{r eval=F}
+ptm <- proc.time()
+
+for (d in 0:foreLength) {
+  # Obtain the AAPL rolling window for this day
+  spReturnsOffset = spReturns[(1+d):(windowLength+d)]
+  
+  # Fit the ARIMA model
+  final.aic <- Inf
+  final.order <- c(0,0,0)
+  
+  #go through all pq combinations
+  for (p in 0:5) for (q in 0:5) {
+    if ( p == 0 && q == 0) {
+      next
+    }
+    
+    # Add xreg for googletrend/twitter
+    arimaFit = tryCatch( arima(spReturnsOffset, order=c(p, 0, q), xreg = tot_df$index),
+                         error=function( err ) FALSE,
+                         warning=function( err ) FALSE )
+    
+    if( !is.logical( arimaFit ) ) {
+      current.aic <- AIC(arimaFit)
+      if (current.aic < final.aic) {
+        final.aic <- current.aic
+        final.order <- c(p, 0, q)
+        # Add xreg for googletrend/
+        final.arima <- arima(spReturnsOffset, order=final.order, xreg = tot_df$index)
+      }
+    } else {
+      next
+    }
+  }
+  
+  # Specify and fit the GARCH model
+  spec = ugarchspec(
+    variance.model=list(garchOrder=c(1,1)),
+    mean.model=list(armaOrder=c(final.order[1], final.order[3]), include.mean=T),
+    distribution.model="sged"
+  )
+  fit = tryCatch(
+    ugarchfit(
+      spec, spReturnsOffset, solver = 'hybrid'
+    ), error=function(e) e, warning=function(w) w
+  )
+  
+  # If the GARCH model does not converge, set the direction to "long" else
+  # choose the correct forecast direction based on the returns prediction
+  # Output the results to the screen and the forecasts vector
+  if(is(fit, "warning")) {
+    forecasts[d+1] = paste(index(spReturnsOffset[windowLength]), 1, sep=",")
+    print(paste(index(spReturnsOffset[windowLength]), 1, sep=","))
+  } else {
+    fore = ugarchforecast(fit, n.ahead=1)
+    ind = fore@forecast$seriesFor
+    forecasts[d+1] = paste(colnames(ind), ifelse(ind[1] < 0, -1, 1), sep=",")
+    print(paste(colnames(ind), ifelse(ind[1] < 0, -1, 1), sep=",")) 
+  }
+}
+proc.time() - ptm
+
+write.csv(forecasts, file="forecasts_wgtrend2.csv", row.names=FALSE)
+```
+
+```{r}
+# Input the Python-refined CSV file
+spArimaGarch_wogtrend = as.xts( 
+  read.zoo(
+    file="forecasts_new_wogtrend.csv", format="%Y-%m-%d", header=F, sep=","
+  )
+)
+
+spArimaGarch_wgtrend = as.xts( 
+  read.zoo(
+    file="forecasts_new_wgtrend.csv", format="%Y-%m-%d", header=F, sep=","
+  )
+)
+
+# Create the ARIMA+GARCH returns
+spIntersect_wogtrend = merge( spArimaGarch_wogtrend[,1], spReturns, all=F )
+spArimaGarchReturns_wogtrend = spIntersect_wogtrend[,1] * spIntersect_wogtrend[,2]
+spArimaGarchReturns_wgtrend = spArimaGarch_wgtrend* spIntersect_wogtrend[,2]
+
+# Create the backtests for ARIMA+GARCH and Buy & Hold
+spArimaGarchCurve_wogtrend = log( cumprod( 1 + spArimaGarchReturns_wogtrend ) )
+spArimaGarchCurve_wgtrend = log( cumprod( 1 + spArimaGarchReturns_wgtrend ) )
+spBuyHoldCurve = log( cumprod( 1 + spIntersect_wogtrend[,2] ) )
+spCombinedCurve = merge(merge( spArimaGarchCurve_wogtrend, spArimaGarchCurve_wgtrend, all=F ), spBuyHoldCurve, all = F)
+
+# Plot the equity curves
+
+# ggplot() + geom_line(aes(x = index(spBuyHoldCurve), y = spBuyHoldCurve), color = 'blue', lwd = 1) + 
+#   geom_line(aes(x = index(spArimaGarchCurve_wogtrend), y = spArimaGarchCurve_wogtrend), color = 'red', lwd = 1) + 
+#   geom_line(aes(x = index(spArimaGarchCurve_wgtrend), y = spArimaGarchCurve_wgtrend), color = 'darkgreen', lwd = 1) +
+#   labs(x = 'Date', y = 'Equity')+ guides(col = guide_legend(nrow = 3))
+
+xyplot(
+  spCombinedCurve,
+  superpose=T,
+  col=c("darkred", "darkblue", "darkgreen"),
+  lwd=2,
+  key=list(
+    text=list(
+      c("ARIMA + GARCH", "ARIMA + GARCH + Google Trend", "Buy & Hold")
+    ),
+    lines=list(
+      lwd=2, col=c("darkred", "darkblue", "darkgreen")
+    )
+  )
+)
+```
+
+We can see that the ARIMA-GARCH models do not perform very well, this may be because there is not much autocorrelation in the daily returns of apple stock. When there is serial correlation this model typically performs very well. Moreover including the google trend into the model outperformed the buy and hold strategy, but only slightly.
+
+Moreover, including the google trend data made the model run much faster. Timing the model, without the google trend data the model took 4838 seconds, which is roughly 1 hour 20 minutes, whereas including the google trend only took 23 minutes. This may be because the threshold for determining whether to buy or sell is acheived faster with the google trend information, compared to without.
+
+
+### Conclusion
+
+We have shown that the including google trend data can influence the performance of a ARIMA-GARCH forecasting model used to predict the daily return on apple stock. This information can not generate larger equity and has a faster run time than the equivalent ARIMA-GARCH model without including google trend data.

@@ -1,0 +1,303 @@
+---
+title: "Pet adoption classification. (week 4)"
+output: bookdown::gitbook
+site: bookdown::bookdown_site
+---
+```{r setup, include=FALSE, message=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message=FALSE, eval = T)
+library(caret); library(stringr); library(dplyr)
+```
+
+# Index
+
+Predict the chance of being adopted for a pet taken to a shelter
+
+* website is at https://ssamsonau.github.io/animal_shelter/     
+* source code is available here https://github.com/ssamsonau/animal_shelter
+
+## Goal and motivations
+
+https://www.kaggle.com/c/shelter-animal-outcomes
+
+## Getting Data
+
+Data are from here https://www.kaggle.com/c/shelter-animal-outcomes
+(playground projects. not a real competition. Does not awards points.)
+
+## Load data
+
+<!-- ```{r} -->
+<!-- if(! str_detect(getwd(), "week4")) setwd("week4") -->
+<!-- if(! str_detect(getwd(), "animal_shelter")) setwd("animal_shelter") -->
+<!-- ``` -->
+
+
+```{r, eval = T}
+knitr::spin_child("scripts/load_data.R")
+```
+
+# Clean data and do feature engineering
+
+```{r eval=T}
+knitr::spin_child("scripts/making_features_4.R")  
+# this will include a content of another file in main document. 
+# also serves as source("file.R")
+```
+
+# Traning and evaluating a model
+
+* Write a function "train_Kappa". We can use this function with different parameters, keeping Rmd clean
+* Source it and use it. Use default values in function
+* Learn to do debuging in R
+
+## pre-process the data
+
+```{r}
+use_formula = TRUE
+DF_for_prep <- DF_binary # use binary outcome
+```
+
+
+```{r, eval = T, cache=TRUE}
+knitr::spin_child("scripts/Pre_process_data.R")  
+```
+
+## Training a Linear model (glm - logisting regression)
+
+```{r eval=T}
+knitr::spin_child("scripts/train_Kappa_4.R") 
+#debugsource("scripts/train_Kappa_4.R")
+```
+
+Now the actual training:
+
+```{r, eval = T}
+res_GLM <- train_Kappa(df_train, error_est = "none", model = "glm")
+names(res_GLM)
+save(res_GLM, file = "Rdata/res_GLM.RData")
+```
+
+```{r}
+load("Rdata/res_GLM.RData")
+```
+
+
+## Evaluating Linear Model
+
+### Predict for one observation of training data
+
+```{r}
+# LEt us take first record in test as an example
+#View(df_train[1, ])
+predict(res_GLM$model, df_train[1, ])
+predict(res_GLM$model, df_train[1, ] , type = "prob") #Predicted Probability
+df_train[1, "outcome"]  #actual
+```
+
+### Predict for all the train observations
+
+```{r}
+trainPred <- predict(res_GLM$model, df_train)
+confusionMatrix(trainPred, df_train$outcome, positive = "yes")
+# Predicted probabilities
+trainPred <- predict(res_GLM$model, df_train, type = "prob")
+```
+
+### ROC Curve
+
+ROC curve is Sensitivity vs Specificity for different cut-off points. 
+(If x axis goes from 0to1 vs 1to0, then Sensit vs 1-Spec)
+
+Each point on the ROC curve represents a sensitivity/specificity pair corresponding to a particular decision threshold.  The closer the ROC curve is to the upper left corner, the higher the overall accuracy of the test.
+
+http://topepo.github.io/caret/other.html
+
+### plot, get probabilities
+
+Function for drawing ROC curve and calculating "best cut-off
+
+```{r eval=T}
+knitr::spin_child("scripts/make_ROC_curve_4.R")
+```
+
+```{r}
+roc_GLM <- make_ROC(res_GLM, df_train)
+best.cut.off <<- roc_GLM$best.cut.off
+trainPred <<- roc_GLM$trainPred
+```
+
+here Area under the curve (AUC) is `r roc_GLM$auc` 
+
+Interpretation: 
+* We want to accept all those who has a chance to be adopted. We want to see high sensitivity algorithm.
+* We want to reject all those who has a chance to be not-adopted. We want to see high selectivity algorithm.
+
+```{r}
+
+confusionMatrix(ifelse(trainPred[, "yes"] > best.cut.off, "yes", "no"), 
+                df_train$outcome, positive = "yes")
+
+# compare to default 0.5
+confusionMatrix(ifelse(trainPred[, "yes"] > 0.5, "yes", "no"), 
+                df_train$outcome, positive = "yes")
+
+# compare to default 0.9 - look at Specificity
+confusionMatrix(ifelse(trainPred[, "yes"] > 0.9, "yes", "no"), 
+                df_train$outcome, positive = "yes")
+```
+
+
+## How to train model with different parameters - how to compare
+
+Either use Accuracy, or Kappa, or ROC (AUC), or distance to best model...
+
+* http://appliedpredictivemodeling.com/blog/2014/2/1/lw6har9oewknvus176q4o41alqw2ow
+
+## Rpart
+
+* no need to scale data for any tree models
+
+```{r eval=T}
+knitr::spin_child("scripts/train_ROC_4.R")
+```
+
+Actual training:
+
+```{r, eval=TRUE}
+res_rp <- train_ROC(df_train, error_est = "cv", model = "rpart", par = T)
+res_rp$model
+save(res_rp, file = "Rdata/res_rp.RData")
+```
+
+
+```{r}
+load("Rdata/res_rp.RData")
+```
+
+
+```{r}
+confusionMatrix(res_rp$model)
+
+# ROC 
+roc_rp <- make_ROC(res_rp, df_train)
+best.cut.off <<- roc_rp$best.cut.off
+trainPred <<- roc_rp$trainPred
+
+confusionMatrix(ifelse(trainPred[, "yes"] > best.cut.off, "yes", "no"), 
+                df_train$outcome, positive = "yes")
+
+roc_rp$auc
+```
+
+here Area under the curve (AUC) is `r roc_rp$auc`
+
+## RF
+
+* does not overfit while number of trees is large.
+* trees ansambles trained independently can be combined
+* does auto feature selection. Can be used for cases n < p (n of observ. less than numb of predic.s)
+
+```{r eval=T}
+knitr::spin_child("scripts/train_ROC_4.R")
+```
+
+Actual training
+
+```{r, eval = T}
+res_rf <- train_ROC(df_train, error_est = "oob", model = "rf", par = T)
+
+res_rf$model$finalModel
+save(res_rf, file = "Rdata/res_rf.RData")
+
+```
+
+<!-- ```{r, eval = T} -->
+<!-- load("Rdata/res_rf.RData") -->
+<!-- ``` -->
+
+
+```{r, eval = T}
+## See how number of trees affects Error
+plot(res_rf$model$finalModel)
+
+# ROC 
+roc_rf <- make_ROC(res_rf, df_train)
+best.cut.off <- roc_rf$best.cut.off
+trainPred <- roc_rf$trainPred
+
+confusionMatrix(ifelse(trainPred[,"yes"] > best.cut.off, "yes", "no"), 
+                res_rf$train$outcome, positive = "yes")
+
+#here Area under the curve (AUC) is `r roc_rf$auc`
+```
+
+
+## Other models to consider
+
+### boosted tree
+
+* can perform better than rf
+* slower to learn
+* can overfit for large number of trees.
+
+### ADA boost
+
+* will do boosted tree model + will change weigth to misclassified classes adaptivelly. 
+Helps for unbalanced classes situation etc.
+
+
+#### Resapling Unbalanced classes
+
+Other approach to unbalanced classes - resampling
+* http://topepo.github.io/caret/sampling.html
+
+
+### SVM
+
+one-vs-all (all-pair) approach for many classes
+
+#### Other models implemented in caret
+
+* https://topepo.github.io/caret/modelList.html
+
+### Combining different models. 
+
+GAM - general additive models.
+Caret - combining models. ansamble models
+
+# Training a model for all classes
+
+### rpart
+
+```{r, eval = T}
+use_formula = TRUE
+DF_for_prep <- DF_features # use all outcomes
+```
+
+```{r, eval = T}
+knitr::spin_child("scripts/Pre_process_data.R")  
+```
+
+```{r, eval=F}
+res_rp_all <- train_Kappa(df_train, error_est = "cv", model = "rpart", par = T)
+res_rp_all$model
+confusionMatrix(res_rp_all$model)
+```
+
+### rf
+
+```{r, eval = F}
+res_rf_all <- train_Kappa(df_train, error_est = "oob", model = "rf", par = T)
+res_rf_all$model$finalModel
+confusionMatrix(res_rp_all$model$finalModel)
+```
+
+# Sample prediction
+
+Let us do prediction for an animal
+
+```{r}
+knitr::spin_child("scripts/prediction.R") 
+```
+
+
